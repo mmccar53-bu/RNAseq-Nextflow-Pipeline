@@ -1,0 +1,644 @@
+---
+title: "project-2-report"
+output: html_document
+date: "2025-10-23"
+author: "Marilyn McCarthy"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# **Introduction**
+
+Type 1 diabetes (T1D) is an autoimmune disease in which the immune
+system targets and destroys insulin-producing β-cells in the pancreas.
+Genetic studies have identified over 120 non-HLA regions associated with
+T1D susceptibility, including the TYK2 gene, which encodes a member of
+the Janus kinase (JAK) family involved in cytokine-mediated STAT
+signaling. TYK2 regulates immune pathways such as type I interferon
+responses, and alterations in its expression or function can influence
+β-cell survival and autoimmune activity. This study investigates the
+role of TYK2 in pancreatic lineage differentiation using RNA sequencing
+(RNA-seq) data from wild-type (WT) and TYK2 knockout (KO) cells. The
+full dataset includes samples from multiple stages of differentiation:
+stem cells (hiPSCs), pancreatic progenitors (S4), endocrine progenitors
+(S5), and immature islets (S6). This analysis specifically focuses on
+the S5 stage, comparing WT and TYK2 KO cells, to examine the effects of
+TYK2 loss during the transition to endocrine progenitors. Transcriptomic
+analysis is employed to identify changes in gene expression and pathway
+activity associated with TYK2 KO, providing insight into its role in
+pancreatic development and potential implications for T1D.
+
+# **Methods**
+
+### **Source of Data**
+
+Paired-end mRNA-seq reads were obtained from
+`/projectnb/bf528/materials/project-2-rnaseq/full_files/*_{R1,R2}.fastq.gz`.
+The human reference genome (GRCh38.primary_assembly.genome.fa) and the
+corresponding annotation file (GENCODE v45,
+gencode.v45.primary_assembly.annotation.gtf) were used for alignment and
+quantification.
+
+### **Workflow Management**
+
+All analyses were executed using Nextflow v25.04.6.5954 to ensure
+reproducibility, modularity, and parallelization of each process.
+
+### **Quality Control**
+
+Initial quality assessment of raw reads was performed using FastQC
+v0.12.1 with default parameters. The `-t` option was used to utilize all
+available CPUs per task. FastQC generated `.html` and `.zip` reports for
+each sample. Summary metrics from all samples and STAR alignment logs
+were aggregated using MultiQC v1.25 with default parameters, producing a
+combined report (`multiqc_report.html`) that provided an overview of
+read quality and alignment statistics.
+
+### **Genome Indexing**
+
+A genome index was generated using STAR v2.7.11b from the GRCh38
+reference genome and the GENCODE v45 annotation. This index was used to
+facilitate accurate and efficient alignment of sequencing reads in
+downstream analysis. Default parameters were used for all indexing
+steps.
+
+### **Annotation Parsing**
+
+Gene identifiers and names were extracted from the GENCODE v45 GTF file
+using a custom Python script (`parse_gtf.py`) executed with Python
+v1.84. The script parsed `gene_id` and `gene_name` fields using regular
+expressions and output a tab-delimited mapping file (`id2name.txt`) for
+downstream use.
+
+### **Read Alignment**
+
+Reads were aligned to the indexed GRCh38 genome using STAR v2.7.11b.
+Input included the pre-built genome index and paired FASTQ files.
+Alignment was performed with threading, compressed input handling, and
+output as coordinate-sorted BAM files. Alignment logs were captured for
+downstream analysis.
+
+### **Read Quantification**
+
+Exon-level read counts were generated from aligned BAM files using VERSE
+v0.1.5. Strand-specific counting was enabled with the `-S` flag. The
+GENCODE v45 GTF file was used as the annotation reference. For each
+sample, VERSE produced a tab-delimited exon count file
+(`[sample_id].exon.txt`).
+
+### **Data Integration**
+
+All exon count files were combined into a single counts matrix using a
+custom Python script (`concat.py`) executed with Python v1.84 and Pandas
+v2.2.3. The script merged all `.exon.txt` files on gene identifiers,
+producing `counts_matrix.csv` with genes as rows and samples as columns.
+Missing values were filled with zeros. This counts matrix was used for
+downstream normalization and differential expression analysis.
+
+# **Results**
+
+### **Quality Control Evaluation**
+
+Sequencing reads across all samples ranged from 84.5 million to 118.9
+million, with an average of approximately 103 million reads per sample.
+STAR alignment rates to the GRCh38 reference genome were high for all
+samples, ranging from 95.8% to 97.8%, with unique alignment rates
+between 91.9% and 94.0%, indicating excellent mapping efficiency. FASTQC
+analysis revealed that all samples passed mean sequence quality,
+per-sequence quality, per-sequence GC content, per-base N content, and
+sequence length distribution. Some issues were observed for per-base
+sequence content, with 6 of 12 sequences flagged with warnings and 6
+failing, and all samples failed sequence duplication level metrics.
+Overrepresented sequences were detected in half of the samples, although
+these sequences accounted for a very small fraction of reads (maximum
+\~0.017%). No adapter contamination was detected in any sample.
+
+Overall, the high read counts, strong alignment rates, and generally
+clean quality metrics suggest that the dataset is of high quality and
+suitable for downstream analysis. Minor issues with sequence content and
+duplication levels are not expected to significantly impact the results;
+however, if necessary, further trimming or removal of duplicated reads
+could be performed to improve data quality.
+
+### **Filtering the counts matrix**
+
+To remove lowly expressed genes that could contribute noise to
+downstream analyses, the counts matrix was filtered to retain only genes
+with counts ≥ 10 in all samples. This threshold ensured that only genes
+with sufficient expression across all six samples were kept for
+analysis. Before filtering, the counts matrix contained 63,241 genes,
+and after applying the filter, 18,513 genes remained. **Figure 1** shows
+a barplot illustrating the effect of filtering on the number of genes,
+highlighting the substantial reduction in lowly expressed genes.
+**Figure 2** presents the distribution of gene counts across all
+samples, log₁₀-transformed to account for skew. Before filtering, the
+majority of genes had very low read counts, resulting in a high density
+near zero, whereas after filtering, this low-count peak was removed,
+leaving a distribution enriched for genes with moderate to high
+expression levels. Together, these figures demonstrate that the
+filtering step effectively removes genes with minimal expression,
+improving the robustness and reliability of downstream differential
+expression analyses by focusing on biologically meaningful genes.
+
+```{r}
+library(DESeq2)
+library(tidyverse)
+cts <- as.matrix(read.csv("results/counts_matrix.csv", row.names='gene'))
+# Apply filter: keep genes with counts >= 10 in all samples
+keep_genes <- rowSums(cts >= 10) >= 6
+filtered_counts <- cts[keep_genes, ]
+# Number of genes before and after filtering
+num_before <- nrow(cts)
+num_after <- nrow(filtered_counts)
+
+# Create a named vector for the barplot
+genes_kept <- c("Before Filtering" = num_before, "After Filtering" = num_after)
+
+# Simple barplot
+barplot(genes_kept,
+        col = c("steelblue", "tomato"),
+        main = "Effect of Filtering on Number of Genes",
+        ylab = "Number of Genes",
+        ylim = c(0, max(genes_kept) * 1.1))
+
+# Add text labels on top of bars
+text(x = 1:length(genes_kept),
+     y = genes_kept,
+     label = genes_kept,
+     pos = 3, cex = 1.2, col = "black")
+```
+
+**Figure 1.** Barplot showing the number of genes before and after
+filtering for counts ≥ 10 in all samples, reducing the dataset from
+63,241 to 18,513 genes.
+
+```{r}
+# Flatten counts to a vector (all genes across all samples)
+cts_all <- as.vector(cts)
+filtered_all <- as.vector(filtered_counts)
+
+# Combine into a data frame
+combined <- data.frame(
+  Count = c(cts_all, filtered_all),
+  Filter = rep(c("Before Filtering", "After Filtering"), 
+               times = c(length(cts_all), length(filtered_all)))
+)
+
+# Add log10 transformation (to handle skew)
+combined$logCount <- log10(combined$Count + 1)
+
+# Density plot of gene counts
+ggplot(combined, aes(x = logCount, fill = Filter)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Distribution of Gene Counts (log₁₀ Transformed)",
+    x = "log₁₀(Read Counts + 1)",
+    y = "Density"
+  ) +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.title = element_blank()
+  )
+```
+
+**Figure 2.** Distribution of log₁₀-transformed read counts across all
+samples before and after filtering, illustrating the removal of lowly
+expressed genes and retention of moderately and highly expressed genes.
+
+### Differential Expression Analysis
+
+Differential expression analysis using DESeq2 identified multiple genes
+with significant changes in expression between wild-type and TYK2 KO
+conditions at the S5 stage. Using an adjusted p-value (padj) threshold
+of 0.05, a total of 1,218 significant genes were detected. The top 10
+differentially expressed genes, ranked by adjusted p-value, are listed
+in **Table 1**. Among these, RPS4Y1 was the most significantly
+upregulated (log₂ fold change = 8.77), whereas SLC2A14 was the most
+significantly downregulated (log₂ fold change = −4.69). Other genes,
+such as ENSG00000289575, also showed strong downregulation (log₂ fold
+change = −3.70). All top 10 genes had extremely low adjusted p-values
+(padj \< 1 × 10⁻⁴²), reflecting high statistical confidence in their
+differential expression.
+
+The set of significant genes was submitted to ENRICHR to identify
+enriched biological pathways and processes. The top pathways from the
+Reactome 2024 database included Extracellular Matrix Organization,
+Degradation of the Extracellular Matrix, Regulation of IGF Transport and
+Uptake by IGFBPs, Neuronal System, Post-translational Protein
+Phosphorylation, Regulation of Beta-Cell Development, and TP53
+Transcriptional Gene Network. These results suggest that TYK2 knockout
+affects multiple cellular processes, including neuronal activity,
+extracellular matrix remodeling, growth factor signaling, and cell
+survival pathways.
+
+Gene Set Enrichment Analysis (GSEA) using fgsea, with log₂ fold change
+as the ranking metric and a padj threshold of 0.05, identified
+significantly enriched pathways under TYK2 KO conditions. The most
+significant positively enriched pathway was REACTOME_NEURONAL_SYSTEM,
+and the most significant negatively enriched pathway was
+PID_P53_DOWNSTREAM_PATHWAY (**Table 2**). The enrichment plot for
+REACTOME_NEURONAL_SYSTEM (**Figure 3**) shows a rapid initial peak in
+the running enrichment score (ES), indicating that genes most strongly
+upregulated in this pathway are clustered near the top of the ranked
+gene list.
+
+The top 10 up- and downregulated pathways from fgsea, ranked by
+normalized enrichment score (NES) and significance, are shown in
+**Figure 4**. Upregulated pathways (positive NES) are displayed in the
+upper section, while downregulated pathways (negative NES) are displayed
+in the lower section. This visualization highlights the genes
+contributing to pathway enrichment and allows direct comparison of the
+magnitude and direction of effects across pathways. Comparison of the
+ENRICHR and fgsea analyses indicates substantial overlap in neuronal and
+extracellular matrix-related pathways. However, fgsea uniquely
+highlighted p53-mediated transcriptional regulation and
+neurodevelopmental pathways, such as those related to autism and ADHD.
+Overall, these analyses suggest that TYK2 knockout modulates neuronal
+function, extracellular matrix remodeling, cell survival, and
+neurodevelopmental pathways.
+
+```{r}
+coldata <- data.frame(
+  sample = c("control_rep2", "exp_rep1", "control_rep1", "exp_rep2", "exp_rep3", "control_rep3"),
+  condition = c("control", "exp", "control", "exp", "exp", "control")
+)
+
+# Set rownames as sample names to match count matrix columns
+rownames(coldata) <- coldata$sample
+coldata$sample <- NULL
+
+#Perform DDS
+dds <- DESeqDataSetFromMatrix(countData = filtered_counts,
+                              colData = coldata,
+                              design = ~ condition)
+dds <- DESeq(dds)
+res <- results(dds, contrast=c("condition","control","exp"))
+resOrdered <- res[order(res$padj),]
+deseq2_res <- as_tibble(resOrdered, rownames='gene')
+id2name <- read_tsv(
+  "results/id2name.txt",
+  col_names = c("gene", "symbol")
+)
+deseq2_res <- deseq2_res %>%
+  left_join(id2name) %>% 
+  relocate(symbol)
+
+deseq2_res %>% 
+  head(10)
+```
+
+**Table 1.** Table of the top 10 differentially expressed genes and the
+statistics provided by DESeq2 as ranked by adjusted p-value.
+
+```{r}
+library(fgsea)
+# Make sure there are no missing values and symbols are unique
+deseq2_res_ordered <- deseq2_res %>% 
+  drop_na(symbol, log2FoldChange) %>% 
+  distinct(symbol, .keep_all = TRUE)
+
+deseq2_res_ranked <- deseq2_res_ordered %>%
+  arrange(desc(log2FoldChange))
+
+ranked_list <- setNames(deseq2_res_ranked$log2FoldChange, deseq2_res_ranked$symbol)
+pathways <- gmtPathways("c2.cp.v2025.1.Hs.symbols.gmt")
+fgseaRes <- fgsea(pathways, ranked_list, minSize=15, maxSize=500)
+
+fgsea_sig <- fgseaRes %>%
+  arrange(padj) %>%
+  filter(padj < 0.05)
+
+head(fgsea_sig)
+```
+
+**Table 2.** Top significantly enriched pathways identified by GSEA
+(padj \< 0.05). Normalized enrichment scores (NES) indicate whether a
+pathway is upregulated (positive) or downregulated (negative).
+
+```{r}
+plotEnrichment(pathways[["REACTOME_NEURONAL_SYSTEM"]],
+               ranked_list) + labs(title="REACTOME_NEURONAL_SYSTEM")
+
+```
+
+**Figure 3.** GSEA enrichment plot for the REACTOME_NEURONAL_SYSTEM
+pathway.
+
+```{r}
+topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=10), pathway]
+topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+plotGseaTable(pathways[topPathways], ranked_list, fgseaRes, 
+              gseaParam=0.5)
+```
+
+**Figure 4.** GSEA plot showing the top 10 upregulated and downregulated
+pathways.
+
+### RNA Seq Quality Control
+
+A principal component analysis (PCA) was performed on the
+variance-stabilized counts from all samples to evaluate sample
+clustering and identify potential outliers. The first two principal
+components (PC1 and PC2) captured the majority of the variance in the
+dataset, with PC1 explaining 10% and PC2 explaining 86% of the total
+variance. Samples clustered largely according to their experimental
+condition, with control replicates grouping together and most
+experimental replicates forming a distinct cluster (**Figure 5**). A
+sample-to-sample distance heatmap was generated using
+variance-stabilized counts to assess the similarity between all samples.
+Pairwise Euclidean distances were calculated, and hierarchical
+clustering was performed using the average linkage method. The heatmap
+shows that replicates generally cluster according to their experimental
+condition (**Figure 6**), indicating high overall consistency in
+sequencing and library preparation.
+
+Both the PCA plot and the sample-to-sample distance heatmap provide
+insight into the quality and reliability of the RNA-seq experiment. In
+the PCA plot, control replicates cluster tightly on the lower left,
+while two experimental replicates (exp_1 and exp_2) cluster on the lower
+right, indicating that the primary source of variation is the
+experimental condition. The third experimental replicate (exp_3) is
+positioned between the other experimental samples and the controls,
+suggesting intermediate gene expression patterns. This behavior may
+reflect biological variability, a partial response to treatment, or
+minor technical differences. The sample-to-sample distance heatmap
+supports the observation that most replicates show high similarity along
+the diagonal (dark blue), while exp_3 appears slightly more similar to
+the controls than to the other experimental replicates, reinforcing the
+PCA result. Overall, these analyses indicate that the dataset is
+reliable and largely captures the expected experimental effects, though
+some variability should be considered in downstream interpretation.
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+vsd <- vst(dds, blind=FALSE)
+# Calculate PCA coordinates
+pcaData <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(x = PC1, y = PC2, color = condition, label = name)) +
+  geom_point(size = 4, alpha = 0.8) +               # points
+  geom_text_repel(size = 3, max.overlaps = 10) +    # sample labels
+  labs(
+    x = paste0("PC1: ", percentVar[1], "% variance"),
+    y = paste0("PC2: ", percentVar[2], "% variance"),
+    title = "PCA of Samples (vsd)",
+    color = "Condition"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+```
+
+**Figure 5.** Variance-stabilized counts were used to perform principal
+component analysis (PCA).
+
+```{r}
+library(pheatmap)
+library(RColorBrewer)
+
+# 1. Compute distances between samples
+sampleDists <- dist(t(assay(vsd)))
+
+# 2. Compute hierarchical clustering
+hc <- hclust(sampleDists, method = "average")
+
+# 3. Convert to matrix for plotting
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- colnames(vsd)
+colnames(sampleDistMatrix) <- colnames(vsd)
+
+# 4. Define colors
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+# 5. Plot with precomputed clustering
+pheatmap(
+  sampleDistMatrix,
+  cluster_rows = hc,
+  cluster_cols = hc,
+  col = colors,
+  main = "Sample-to-Sample Distances",
+  fontsize_row = 10,
+  fontsize_col = 10,
+  border_color = NA
+)
+```
+
+**Figure 6.** Sample-to-sample distance heatmap. Pairwise Euclidean
+distances were calculated from variance-stabilized counts, and
+hierarchical clustering was performed using the average linkage method.
+
+### Replicate Figure 3C and 3F
+
+A volcano plot was generated to visualize differential gene expression
+between TYK2 KO and wild-type S5 cells (**Figure 7**). Genes with
+missing values were removed, and the magnitude of expression change
+(log₂ fold change) was plotted on the x-axis, while statistical
+significance (−log₁₀ of the adjusted p-value) was plotted on the y-axis.
+Genes were categorized as upregulated, downregulated, or not significant
+based on a padj threshold of 0.01, consistent with the threshold used in
+the original study. The most significantly up- and downregulated genes
+were labeled directly on the plot to highlight key changes. To improve
+readability, the y-axis was limited to −log₁₀(padj) ≤ 15, focusing on
+the region with the majority of significant genes. Horizontal and
+vertical reference lines indicate the significance threshold and no
+change in expression, respectively, and colors distinguish upregulated,
+downregulated, and non-significant genes.
+
+Using this threshold, the original study reported 319 upregulated and
+412 downregulated genes, whereas the present analysis identified 392
+upregulated and 322 downregulated genes. Differences likely arise from
+methodological variations, including the analysis of only the S5
+timepoint (rather than all differentiation stages), the use of a
+different version of the human reference genome, and potential
+differences in STAR versions or parameters. Additionally, the filtering
+of genes differed slightly, which may have influenced the counts of
+significant genes. Despite these differences, the overall patterns of
+up- and downregulation are largely consistent.
+
+To replicate the approach in Figure 3f, a barplot was generated to
+visualize the Reactome pathways most affected by differential expression
+(**Figure 8**). The plot shows the percentage of differentially
+expressed genes in the top six pathways, selected as the three most
+upregulated and three most downregulated according to normalized
+enrichment score (NES). The most upregulated pathways were
+REACTOME_NEURONAL_SYSTEM, WP_DOPAMINERGIC_NEUROGENESIS, and
+WP_NICOTINE_EFFECT_ON_DOPAMINERGIC_NEURONS, while the most downregulated
+pathways were PID_P53_DOWNSTREAM_PATHWAY,
+REACTOME_ASSEMBLY_OF_COLLAGEN_FIBRILS_AND_OTHER_MULTIMERIC_STRUCTURES,
+and PID_INTEGRIN1_PATHWAY. The fill color indicates the significance of
+enrichment, with darker shades corresponding to lower adjusted p-values
+(−log₁₀ padj). This visualization allows for a direct comparison of both
+the relative contribution of DE genes and the statistical significance
+across the most impacted pathways.
+
+Comparison of enrichment results between the original study and the
+present analysis shows substantial overlap in affected pathways,
+including neuronal system, extracellular matrix organization, and
+p53-related processes. Some differences in pathway ranking and
+significance likely reflect the use of only the S5 timepoint and the
+methodological differences noted above. Overall, these figures
+demonstrate that the differential expression patterns and pathway-level
+impacts observed in this analysis are broadly consistent with the
+original findings, while highlighting specific nuances introduced by
+focusing on a single developmental stage.
+
+```{r}
+volcano_data <- deseq2_res %>%
+  drop_na(log2FoldChange, padj, symbol) %>%
+  mutate(
+    negLog10Padj = -log10(padj),
+    regulation = case_when(
+      padj < 0.01 & log2FoldChange > 0 ~ "Up",
+      padj < 0.01 & log2FoldChange < 0 ~ "Down",
+      TRUE ~ "Not Sig"
+    )
+  )
+
+top_up <- volcano_data %>%
+  filter(regulation == "Up") %>%
+  arrange(padj) %>%
+  slice_head(n = 10)
+
+top_down <- volcano_data %>%
+  filter(regulation == "Down") %>%
+  arrange(padj) %>%
+  slice_head(n = 10)
+
+top_genes <- bind_rows(top_up, top_down)
+
+sig_genes <- volcano_data %>%
+  filter(regulation != "Not Sig", negLog10Padj <= 15)
+
+# Top 15 upregulated by log2FC
+top_up <- sig_genes %>%
+  filter(regulation == "Up") %>%
+  arrange(desc(log2FoldChange)) %>%
+  slice_head(n = 15)
+
+# Top 5 downregulated by log2FC
+top_down <- sig_genes %>%
+  filter(regulation == "Down") %>%
+  arrange(log2FoldChange) %>%  # most negative first
+  slice_head(n = 15)
+
+# Combine top genes
+top_genes <- bind_rows(top_up, top_down)
+
+ggplot(volcano_data, aes(x = log2FoldChange, y = negLog10Padj)) +
+  geom_point(aes(color = regulation), alpha = 0.6, size = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  geom_text_repel(
+    data = top_genes,
+    aes(label = symbol),
+    size = 3.5,
+    max.overlaps = Inf,
+    box.padding = 0.5,
+    point.padding = 0.5,
+    segment.color = 'grey50',
+    segment.size = 0.5,
+    nudge_y = 0.5,
+    min.segment.length = 0
+  ) +
+  scale_color_manual(values = c("Up" = "#FF6961", "Down" = "#00AFBB", "Not Sig" = "gray")) +
+  labs(
+    x = "Expression difference (log2 fold change)",
+    y = "-log10(adjusted p-value)",
+    color = "Regulation",
+    title = "Volcano Plot of DE Genes"
+  ) +
+  coord_cartesian(ylim = c(0, 15)) +
+  theme_minimal(base_size = 14)
+```
+
+**Figure 7.** Volcano plot of differentially expressed genes.
+
+```{r}
+# Compute percent DE genes
+fgsea_sig <- fgsea_sig %>%
+  mutate(
+    percent_DE = 100 * sapply(leadingEdge, length) / size
+  )
+
+# Select top pathways: 3 upregulated and 3 downregulated by NES
+top_up <- fgsea_sig %>%
+  arrange(desc(NES)) %>%
+  slice_head(n = 3)
+
+top_down <- fgsea_sig %>%
+  arrange(NES) %>%
+  slice_head(n = 3)
+
+# Combine selected pathways
+plot_df <- bind_rows(top_up, top_down)
+
+# Wrap long pathway names
+plot_df$pathway <- str_wrap(plot_df$pathway, width = 30)
+
+# Order pathways for plotting
+plot_df <- plot_df %>%
+  arrange(percent_DE) %>%
+  mutate(pathway = factor(pathway, levels = pathway))
+
+
+plot_df$pathway <- as.character(plot_df$pathway)
+
+split_every_second_underscore <- function(x) {
+  # Find positions of all underscores
+  underscores <- str_locate_all(x, fixed("_"))[[1]][, "start"]
+  
+  if(length(underscores) < 2) {
+    return(x)  # no split if less than 2 underscores
+  }
+  
+  # We want to insert line breaks after every 2nd underscore:
+  # Find positions after which to insert newline
+  breaks <- underscores[seq(2, length(underscores), by = 2)]
+  
+  # Start building new string by splitting at these positions
+  prev_pos <- 1
+  parts <- c()
+  for(pos in breaks) {
+    parts <- c(parts, substr(x, prev_pos, pos - 1))
+    prev_pos <- pos
+  }
+  # Add remaining part
+  parts <- c(parts, substr(x, prev_pos, nchar(x)))
+  
+  # Join parts with newline
+  paste(parts, collapse = "\n")
+}
+
+# Apply to all pathway names
+plot_df$pathway <- sapply(plot_df$pathway, split_every_second_underscore)
+# Plot
+ggplot(plot_df, aes(x = percent_DE, y = pathway, fill = -log10(padj))) +
+  geom_col(width = 0.6) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue", name = "-log10(adj p)") +
+  labs(
+    x = "Percentage of DE genes in pathway (%)",
+    y = "Reactome Pathway",
+    title = "S5: Reactome Enrichment"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.y = element_text(size = 7),            # make y-axis text smaller
+    plot.margin = margin(t = 10, r = 30, b = 10, l = 60)  # extra left margin for y text
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.1)))  # opt: add space at right for labels on bars if any
+  
+```
+
+**Figure 8.** Barplot showing the top three upregulated and top three
+downregulated Reactome pathways enriched in TYK2 KO S5 cells relative to
+WT.

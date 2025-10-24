@@ -1,0 +1,533 @@
+---
+title: "project-2-report"
+output: html_document
+date: "2025-10-21"
+---
+
+```{r}
+library(DESeq2)
+library(tidyverse)
+```
+
+```{r}
+cts <- as.matrix(read.csv("results/counts_matrix.csv", row.names='gene'))
+```
+
+```{r}
+# Apply filter: keep genes with counts >= 10 in all samples
+keep_genes <- rowSums(cts >= 10) >= 6
+filtered_counts <- cts[keep_genes, ]
+
+# Report genes before and after filtering
+cat("Number of genes before filtering:", nrow(cts), "\n")
+cat("Number of genes after filtering:", nrow(filtered_counts), "\n")
+```
+
+```{r}
+# Number of genes before and after filtering
+num_before <- nrow(cts)
+num_after <- nrow(filtered_counts)
+
+# Create a named vector for the barplot
+genes_kept <- c("Before Filtering" = num_before, "After Filtering" = num_after)
+
+# Simple barplot
+barplot(genes_kept,
+        col = c("steelblue", "tomato"),
+        main = "Effect of Filtering on Number of Genes",
+        ylab = "Number of Genes",
+        ylim = c(0, max(genes_kept) * 1.1))
+
+# Add text labels on top of bars
+text(x = 1:length(genes_kept),
+     y = genes_kept,
+     label = genes_kept,
+     pos = 3, cex = 1.2, col = "black")
+```
+
+```{r}
+# Flatten counts to a vector (all genes across all samples)
+cts_all <- as.vector(cts)
+filtered_all <- as.vector(filtered_counts)
+
+# Combine into a data frame
+combined <- data.frame(
+  Count = c(cts_all, filtered_all),
+  Filter = rep(c("Before Filtering", "After Filtering"), 
+               times = c(length(cts_all), length(filtered_all)))
+)
+
+# Add log10 transformation (to handle skew)
+combined$logCount <- log10(combined$Count + 1)
+
+# Density plot of gene counts
+ggplot(combined, aes(x = logCount, fill = Filter)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Distribution of Gene Counts (log₁₀ Transformed)",
+    x = "log₁₀(Read Counts + 1)",
+    y = "Density"
+  ) +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.title = element_blank()
+  )
+```
+
+```{r}
+coldata <- data.frame(
+  sample = c("control_rep2", "exp_rep1", "control_rep1", "exp_rep2", "exp_rep3", "control_rep3"),
+  condition = c("control", "exp", "control", "exp", "exp", "control")
+)
+
+# Set rownames as sample names to match count matrix columns
+rownames(coldata) <- coldata$sample
+coldata$sample <- NULL
+```
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = filtered_counts,
+                              colData = coldata,
+                              design = ~ condition)
+```
+
+```{r}
+dds <- DESeq(dds)
+res <- results(dds, contrast=c("condition","control","exp"))
+```
+
+```{r}
+resOrdered <- res[order(res$padj),]
+deseq2_res <- as_tibble(resOrdered, rownames='gene')
+deseq2_res
+```
+
+```{r}
+id2name <- read_tsv(
+  "results/id2name.txt",
+  col_names = c("gene", "symbol")
+)
+
+# View the tibble
+id2name
+```
+
+```{r}
+deseq2_res <- deseq2_res %>%
+  left_join(id2name) %>% 
+  relocate(symbol)
+
+deseq2_res
+```
+
+```{r}
+post_res <- deseq2_res %>% 
+  filter(padj < .05) %>% 
+  select(symbol)
+
+post_res
+
+write.table(post_res, file = "positive_sig_genes.txt", col.names = F, row.names = F, quote = F)
+```
+
+```{r}
+vsd <- vst(dds, blind=FALSE)
+```
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+
+# Calculate PCA coordinates
+pcaData <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(x = PC1, y = PC2, color = condition, label = name)) +
+  geom_point(size = 4, alpha = 0.8) +               # points
+  geom_text_repel(size = 3, max.overlaps = 10) +    # sample labels
+  labs(
+    x = paste0("PC1: ", percentVar[1], "% variance"),
+    y = paste0("PC2: ", percentVar[2], "% variance"),
+    title = "PCA of Samples (vsd)",
+    color = "Condition"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+
+```
+
+```{r}
+library(pheatmap)
+library(RColorBrewer)
+
+# 1. Compute distances between samples
+sampleDists <- dist(t(assay(vsd)))
+
+# 2. Compute hierarchical clustering
+hc <- hclust(sampleDists, method = "average")
+
+# 3. Convert to matrix for plotting
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- colnames(vsd)
+colnames(sampleDistMatrix) <- colnames(vsd)
+
+# 4. Define colors
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+# 5. Plot with precomputed clustering
+pheatmap(
+  sampleDistMatrix,
+  cluster_rows = hc,
+  cluster_cols = hc,
+  col = colors,
+  main = "Sample-to-Sample Distances (Euclidean)",
+  fontsize_row = 10,
+  fontsize_col = 10,
+  border_color = NA
+)
+```
+
+```{r}
+library(fgsea)
+```
+
+```{r}
+# Make sure there are no missing values and symbols are unique
+deseq2_res_ordered <- deseq2_res %>% 
+  drop_na() %>% 
+  distinct(symbol, .keep_all = TRUE)
+
+deseq2_res_ranked <- deseq2_res_ordered %>%
+  arrange(desc(log2FoldChange))
+
+ranked_list <- setNames(deseq2_res_ranked$log2FoldChange, deseq2_res_ranked$symbol)
+```
+
+```{r}
+pathways <- gmtPathways("c2.cp.v2025.1.Hs.symbols.gmt")
+```
+
+```{r}
+fgseaRes <- fgsea(pathways, ranked_list, minSize=15, maxSize=500)
+```
+
+```{r}
+fgsea_sig <- fgseaRes %>%
+  arrange(padj) %>%
+  filter(padj < 0.05)
+
+head(fgsea_sig)
+```
+
+```{r}
+plotEnrichment(pathways[["REACTOME_NEURONAL_SYSTEM"]],
+               ranked_list) + labs(title="REACTOME_NEURONAL_SYSTEM")
+
+```
+
+```{r}
+topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=10), pathway]
+topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+plotGseaTable(pathways[topPathways], ranked_list, fgseaRes, 
+              gseaParam=0.5)
+```
+
+```{r}
+library(dplyr)
+
+volcano_data <- deseq2_res %>%
+  drop_na(log2FoldChange, padj, symbol) %>%
+  mutate(
+    negLog10Padj = -log10(padj),
+    regulation = case_when(
+      padj < 0.01 & log2FoldChange > 0 ~ "Up",
+      padj < 0.01 & log2FoldChange < 0 ~ "Down",
+      TRUE ~ "Not Sig"
+    )
+  )
+
+top_up <- volcano_data %>%
+  filter(regulation == "Up") %>%
+  arrange(padj) %>%
+  slice_head(n = 10)
+
+top_down <- volcano_data %>%
+  filter(regulation == "Down") %>%
+  arrange(padj) %>%
+  slice_head(n = 10)
+
+top_genes <- bind_rows(top_up, top_down)
+
+library(ggplot2)
+library(ggrepel)
+
+sig_genes <- volcano_data %>%
+  filter(regulation != "Not Sig", negLog10Padj <= 15)
+
+# Top 15 upregulated by log2FC
+top_up <- sig_genes %>%
+  filter(regulation == "Up") %>%
+  arrange(desc(log2FoldChange)) %>%
+  slice_head(n = 15)
+
+# Top 5 downregulated by log2FC
+top_down <- sig_genes %>%
+  filter(regulation == "Down") %>%
+  arrange(log2FoldChange) %>%  # most negative first
+  slice_head(n = 15)
+
+# Combine top genes
+top_genes <- bind_rows(top_up, top_down)
+
+library(ggplot2)
+library(ggrepel)
+
+ggplot(volcano_data, aes(x = log2FoldChange, y = negLog10Padj)) +
+  geom_point(aes(color = regulation), alpha = 0.6, size = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  geom_text_repel(
+    data = top_genes,
+    aes(label = symbol),
+    size = 3.5,
+    max.overlaps = Inf,
+    box.padding = 0.5,
+    point.padding = 0.5,
+    segment.color = 'grey50',
+    segment.size = 0.5,
+    nudge_y = 0.5,
+    min.segment.length = 0
+  ) +
+  scale_color_manual(values = c("Up" = "#FF6961", "Down" = "#00AFBB", "Not Sig" = "gray")) +
+  labs(
+    x = "Expression difference (log2 fold change)",
+    y = "-log10(adjusted p-value)",
+    color = "Regulation",
+    title = "Volcano Plot of DE Genes"
+  ) +
+  coord_cartesian(ylim = c(0, 15)) +
+  theme_minimal(base_size = 14)
+
+```
+
+```{r}
+sig_threshold <- 0.01
+# Add a column for regulation based on log2FoldChange and padj
+volcano_data <- volcano_data %>%
+  mutate(
+    regulation = case_when(
+      padj < sig_threshold & log2FoldChange > 0 ~ "Up",
+      padj < sig_threshold & log2FoldChange < 0 ~ "Down",
+      TRUE ~ "Not Sig"
+    )
+  )
+
+# Count the number of genes in each category
+table(volcano_data$regulation)
+```
+
+```{r}
+library(scales)
+
+df_plot <- fgseaRes %>% 
+  slice_min(padj, n = 7) %>% 
+  mutate(Group = ifelse(row_number() <= 4, "Upper", "Lower"))
+
+ggplot(df_plot, aes(x = NES, y = reorder(pathway, NES), fill = padj)) +
+  geom_col() +
+scale_fill_gradientn(
+  colors = c("red", "magenta", "blue"),
+  values = scales::rescale(c(min(df_plot$padj, na.rm = TRUE), median(df_plot$padj, na.rm = TRUE), max(df_plot$padj, na.rm = TRUE))),
+  limits = range(df_plot$padj, na.rm = TRUE),
+  name = "Adjusted p-value"
+) +
+  facet_wrap(~Group, scales = "free_y", ncol = 1) +
+  labs(
+    x = "NES (or % DE genes in category)",
+    y = NULL,
+    title = "S5: Reactome enrichment"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    strip.background = element_blank(),
+    strip.text = element_blank()
+  )
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+# 1️⃣ Select top pathways
+up <- fgseaRes %>%
+  filter(NES > 0, !is.na(padj)) %>%
+  arrange(padj) %>%
+  slice_head(n = 4) %>%
+  mutate(Direction = "Upregulated")
+
+down <- fgseaRes %>%
+  filter(NES < 0, !is.na(padj)) %>%
+  arrange(padj) %>%
+  slice_head(n = 3) %>%
+  mutate(Direction = "Downregulated")
+
+df_plot <- bind_rows(up, down)
+
+# 2️⃣ Scale NES to 0-30% for plotting
+df_plot <- df_plot %>%
+  mutate(percent_DE = abs(NES) / max(abs(NES), na.rm = TRUE) * 30)
+
+# Arrow offset for clarity
+arrow_offset <- max(df_plot$percent_DE, na.rm = TRUE) * 0.05
+
+# 3️⃣ Plot
+ggplot(df_plot, aes(x = percent_DE, y = reorder(pathway, percent_DE), fill = padj)) +
+  geom_col() +
+  geom_text(
+    aes(
+      label = ifelse(NES > 0, "\u2191", "\u2193"),
+      x = ifelse(NES > 0, percent_DE + arrow_offset, percent_DE - arrow_offset),
+      color = Direction
+    ),
+    size = 5,
+    fontface = "bold",
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = c("Upregulated" = "red3", "Downregulated" = "blue3")) +
+  scale_fill_gradient(
+    low = "blue",
+    high = "red",
+    limits = c(0, 0.4),
+    name = "Adjusted p-value"
+  ) +
+  facet_wrap(~Direction, scales = "free_y", ncol = 1) +
+  labs(
+    x = "% DE genes in category (scaled NES)",
+    y = NULL,
+    title = "S5: Reactome enrichment"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold")
+  )
+
+
+```
+
+```{r}
+# Compute percent DE genes
+fgsea_sig <- fgsea_sig %>%
+  mutate(
+    percent_DE = 100 * sapply(leadingEdge, length) / size
+  )
+
+# Select top pathways: 3 upregulated and 3 downregulated by NES
+top_up <- fgsea_sig %>%
+  arrange(desc(NES)) %>%
+  slice_head(n = 3)
+
+top_down <- fgsea_sig %>%
+  arrange(NES) %>%
+  slice_head(n = 3)
+
+# Combine selected pathways
+plot_df <- bind_rows(top_up, top_down)
+
+# Wrap long pathway names
+plot_df$pathway <- str_wrap(plot_df$pathway, width = 30)
+
+# Order pathways for plotting
+plot_df <- plot_df %>%
+  arrange(percent_DE) %>%
+  mutate(pathway = factor(pathway, levels = pathway))
+
+
+plot_df$pathway <- as.character(plot_df$pathway)
+
+split_every_second_underscore <- function(x) {
+  # Find positions of all underscores
+  underscores <- str_locate_all(x, fixed("_"))[[1]][, "start"]
+  
+  if(length(underscores) < 2) {
+    return(x)  # no split if less than 2 underscores
+  }
+  
+  # We want to insert line breaks after every 2nd underscore:
+  # Find positions after which to insert newline
+  breaks <- underscores[seq(2, length(underscores), by = 2)]
+  
+  # Start building new string by splitting at these positions
+  prev_pos <- 1
+  parts <- c()
+  for(pos in breaks) {
+    parts <- c(parts, substr(x, prev_pos, pos - 1))
+    prev_pos <- pos
+  }
+  # Add remaining part
+  parts <- c(parts, substr(x, prev_pos, nchar(x)))
+  
+  # Join parts with newline
+  paste(parts, collapse = "\n")
+}
+
+# Apply to all pathway names
+plot_df$pathway <- sapply(plot_df$pathway, split_every_second_underscore)
+# Plot
+ggplot(plot_df, aes(x = percent_DE, y = pathway, fill = -log10(padj))) +
+  geom_col(width = 0.6) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue", name = "-log10(adj p)") +
+  labs(
+    x = "Percentage of DE genes in pathway (%)",
+    y = "Reactome Pathway",
+    title = "S5: Reactome Enrichment"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.y = element_text(size = 7),            # make y-axis text smaller
+    plot.margin = margin(t = 10, r = 30, b = 10, l = 60)  # extra left margin for y text
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.1)))  # opt: add space at right for labels on bars if any
+  
+```
+
+```{r}
+top_down$pathway
+```
+
+
+```{r}
+
+# Wrap pathway names to break long texts into multiple lines
+plot_df$pathway <- str_wrap(plot_df$pathway, width = 30)
+
+ggplot(plot_df, aes(x = percent_DE, y = pathway, fill = -log10(padj))) +
+  geom_col(width = 0.6) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue", name = "-log10(adj p)") +
+  labs(
+    x = "Percentage of DE genes in pathway (%)",
+    y = "Reactome Pathway",
+    title = "S5: Reactome Enrichment"
+  ) +
+  theme_minimal(base_size = 12) +  # smaller base font size
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.y = element_text(size = 7),            # make y-axis text smaller
+    axis.title.y = element_text(margin = margin(r = 10)), # space between y label and text
+    plot.margin = margin(t = 10, r = 30, b = 10, l = 60)  # extra left margin for y text
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.1)))  # opt: add space at right for labels on bars if any
+```

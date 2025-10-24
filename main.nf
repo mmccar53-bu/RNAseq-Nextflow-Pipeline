@@ -6,6 +6,7 @@ include {PARSE_GTF} from './modules/parse_gtf'
 include {STAR_ALIGN} from './modules/star_align'
 include {MULTIQC} from './modules/multiqc'
 include {VERSE} from './modules/verse'
+include {CONCAT} from './modules/concat'
 
 workflow {
    
@@ -16,9 +17,9 @@ workflow {
     FASTQC(fastqc_ch)
     INDEX(params.genome, params.gtf)
     STAR_ALIGN(INDEX.out.index, align_ch)
-    multiqc_ch = FASTQC.out.zip.map { tuple -> [tuple[1]] }.mix(STAR_ALIGN.out.log.map { file -> [file] }).flatten().collect() 
+    multiqc_ch = FASTQC.out.zip.map { sample, files -> files }.flatten().mix(STAR_ALIGN.out.log.map{sample,log -> log}).collect()
     MULTIQC(multiqc_ch)
-    VERSE(STAR_ALIGN.out.bam, params.gtf)
-
+    VERSE(STAR_ALIGN.out.bam, Channel.value(params.gtf))
+    CONCAT(VERSE.out.exon_counts.collect())
 
 }

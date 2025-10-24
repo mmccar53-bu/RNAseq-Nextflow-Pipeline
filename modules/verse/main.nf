@@ -6,7 +6,7 @@ process VERSE {
     publishDir params.outdir, mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam)
+    tuple val (sample_id), path (bam)
     path gtf
 
     output:
@@ -14,11 +14,8 @@ process VERSE {
 
     shell:
     """
-    verse -bam $bam -S -o ${sample_id}.exon.txt -a $gtf
+    verse -S ${bam} -a ${gtf} -o ${sample_id}
     """
 
-    stub:
-    """
-    touch ${sample_id}.exon.txt
-    """
+ 
 }

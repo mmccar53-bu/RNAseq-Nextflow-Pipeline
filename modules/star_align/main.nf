@@ -10,8 +10,8 @@ process STAR_ALIGN {
     tuple val(name), path(reads)
 
     output:
-    path("${name}.Aligned.sortedByCoord.out.bam"), emit: bam
-    path "${name}.Log.final.out", emit: log
+    tuple val(name), path("${name}.Aligned.sortedByCoord.out.bam"), emit: bam
+    tuple val(name), path("${name}.Log.final.out"), emit: log
 
     shell:
     """
