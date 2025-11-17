@@ -22,7 +22,7 @@ filtered_counts <- cts[keep_genes, ]
 cat("Number of genes before filtering:", nrow(cts), "\n")
 cat("Number of genes after filtering:", nrow(filtered_counts), "\n")
 ```
-
+#
 ```{r}
 # Number of genes before and after filtering
 num_before <- nrow(cts)
